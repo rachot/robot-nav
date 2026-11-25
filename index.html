@@ -83,18 +83,19 @@
 
   <div class="card">
     <h2>เส้นทาง</h2>
-    <div class="pt">
-      <div class="dot" style="background:var(--green)">A</div>
-      <div class="coord" id="startTxt">ยังไม่กำหนด</div>
-      <button id="pickStart">เลือกบนแผนที่</button>
-    </div>
-    <div class="pt">
-      <div class="dot" style="background:var(--red)">B</div>
-      <div class="coord" id="goalTxt">ยังไม่กำหนด</div>
-      <button id="pickGoal">เลือกบนแผนที่</button>
+    <label style="margin-top:0">รูปแบบเส้นทาง</label>
+    <select id="mode" style="margin-bottom:10px">
+      <option value="foot">ตามทางเดินเท้า (หุ่นยนต์)</option>
+      <option value="car">ตามถนน (รถยนต์)</option>
+      <option value="straight">กำหนดเอง — เส้นตรงระหว่างจุด</option>
+    </select>
+    <div id="wpList"></div>
+    <div class="row">
+      <button id="pickAdd">＋ เพิ่มจุดบนแผนที่</button>
+      <button id="undo">ลบจุดล่าสุด</button>
     </div>
     <div class="row">
-      <button id="useRobot">ใช้ตำแหน่งหุ่นยนต์เป็นต้นทาง</button>
+      <button id="useRobot">ใช้ตำแหน่งปัจจุบันเป็นต้นทาง</button>
     </div>
     <div class="grid" style="margin-top:10px">
       <div class="stat"><small id="distLbl">ระยะทาง</small><b id="dist">–</b></div>
@@ -115,6 +116,28 @@
     </div>
     <label>ความเร็วหุ่นยนต์: <span id="spdVal">1.5</span> m/s</label>
     <input type="range" id="spd" min="0.3" max="3" step="0.1" value="1.5">
+  </div>
+
+  <div class="card">
+    <h2>เส้นทางของฉัน</h2>
+    <div class="row">
+      <input type="text" id="routeName" placeholder="ตั้งชื่อเส้นทาง" maxlength="60">
+      <button id="saveRoute" style="width:auto">บันทึก</button>
+    </div>
+    <label>เส้นทางที่บันทึกไว้ในอุปกรณ์นี้</label>
+    <select id="saved"></select>
+    <div class="row">
+      <button id="loadRoute">เปิด</button>
+      <button id="delRoute" class="danger">ลบ</button>
+    </div>
+    <div class="row">
+      <button id="gmaps" class="primary">นำทางใน Google Maps (จอรถ)</button>
+    </div>
+    <div class="row">
+      <button id="shareLink">คัดลอกลิงก์เส้นทาง</button>
+      <button id="gpx">ดาวน์โหลด GPX</button>
+    </div>
+    <div class="msg" id="saveMsg"></div>
   </div>
 
   <div class="card">
@@ -155,14 +178,18 @@
       </details>
     </div>
   </div>
-  <p class="hint">คลิก "เลือกบนแผนที่" แล้วคลิกตำแหน่งที่ต้องการ หมุด A/B ลากเพื่อปรับได้ เส้นทางคำนวณตามทางเดินเท้าจาก OpenStreetMap</p>
+  <p class="hint">กด "เพิ่มจุดบนแผนที่" แล้วคลิกทีละจุดตามลำดับที่ต้องการให้ผ่าน ลากหมุดเพื่อปรับได้ กด ✕ เพื่อลบจุด เส้นทางที่บันทึกจะเก็บอยู่ในเบราว์เซอร์ของอุปกรณ์นี้ ใช้ "คัดลอกลิงก์เส้นทาง" เพื่อเปิดในอุปกรณ์อื่น</p>
 </aside>
 <div id="map"></div>
 
 <script>
 const $ = id => document.getElementById(id);
 const HOME = [13.7367, 100.5331];
-const ROUTE_API = 'https://routing.openstreetmap.de/routed-foot/route/v1/foot/';
+const ROUTE_API = {
+  foot: 'https://routing.openstreetmap.de/routed-foot/route/v1/foot/',
+  car: 'https://routing.openstreetmap.de/routed-car/route/v1/driving/'
+};
+const SAVE_KEY = 'robotnav.routes';
 
 // ---------- geometry ----------
 const R = 6371000, rad = d => d * Math.PI / 180, deg = r => r * 180 / Math.PI;
@@ -216,9 +243,9 @@ const trailLine = L.polyline([], { color: '#2fbf71', weight: 4, opacity: .9, das
 // ---------- state ----------
 const robot = { pos: HOME.slice(), heading: 0, speed: 0 };
 const robotMarker = L.marker(HOME, { icon: robotIcon, zIndexOffset: 1000, interactive: false }).addTo(map);
-let startM = null, goalM = null;
-let route = null;                 // { pts: [[lat,lon]], total, fallback }
-let pickMode = null;              // 'start' | 'goal' | 'robot'
+let wps = [];                     // user-defined waypoint markers, in visiting order
+let route = null;                 // { pts: [[lat,lon]], cum, total, duration, fallback }
+let pickMode = null;              // 'add' | 'robot'
 const mission = { state: 'idle', pts: null, cum: null, total: 0, traveled: 0, seg: 0 };
 let source = 'sim', ws = null, routeReq = 0;
 
@@ -248,55 +275,106 @@ function remainingFromRobot() {
 }
 
 // ---------- route ----------
-function placePoint(kind, latlng) {
-  const isStart = kind === 'start';
-  let m = isStart ? startM : goalM;
-  if (m) m.setLatLng(latlng);
-  else {
-    m = L.marker(latlng, { icon: isStart ? pin('#2fbf71', 'A') : pin('#ef5350', 'B'), draggable: true }).addTo(map);
-    m.on('dragend', () => { if (mission.state === 'idle') computeRoute(); else updatePointText(); });
-    if (isStart) startM = m; else goalM = m;
-  }
-  computeRoute();
+const isActive = () => mission.state === 'run' || mission.state === 'pause';
+const wpCoords = () => wps.map(m => [m.getLatLng().lat, m.getLatLng().lng]);
+const wpColor = i => i === 0 ? '#2fbf71' : i === wps.length - 1 ? '#ef5350' : '#3b9eff';
+const wpLabel = i => i === 0 ? 'A' : i === wps.length - 1 ? 'B' : String(i);
+
+function addWp(latlng) {
+  const m = L.marker(latlng, { draggable: true }).addTo(map);
+  m.on('dragend', () => onWpsChanged());
+  wps.push(m);
 }
-function updatePointText() {
-  const f = m => m ? `${m.getLatLng().lat.toFixed(6)}, ${m.getLatLng().lng.toFixed(6)}` : 'ยังไม่กำหนด';
-  $('startTxt').textContent = f(startM); $('goalTxt').textContent = f(goalM);
+function removeWp(i) {
+  if (isActive()) return;
+  map.removeLayer(wps[i]); wps.splice(i, 1); onWpsChanged();
 }
-async function computeRoute() {
-  updatePointText();
-  if (!startM || !goalM) return;
-  const a = [startM.getLatLng().lat, startM.getLatLng().lng];
-  const b = [goalM.getLatLng().lat, goalM.getLatLng().lng];
+function setEditable(on) { wps.forEach(m => on ? m.dragging.enable() : m.dragging.disable()); }
+function onWpsChanged(fit = false) {
+  if (mission.state === 'done') mission.state = 'idle';
+  const list = $('wpList');
+  list.textContent = '';
+  if (!wps.length) list.innerHTML = '<p class="hint" style="margin:0 0 8px">ยังไม่มีจุดในเส้นทาง</p>';
+  wps.forEach((m, i) => {
+    m.setIcon(pin(wpColor(i), wpLabel(i)));
+    const row = document.createElement('div'); row.className = 'pt';
+    const dot = document.createElement('div'); dot.className = 'dot';
+    dot.style.background = wpColor(i); dot.textContent = wpLabel(i);
+    const txt = document.createElement('div'); txt.className = 'coord';
+    txt.textContent = `${m.getLatLng().lat.toFixed(6)}, ${m.getLatLng().lng.toFixed(6)}`;
+    const del = document.createElement('button'); del.textContent = '✕'; del.title = 'ลบจุดนี้';
+    del.onclick = () => removeWp(wps.indexOf(m));
+    row.append(dot, txt, del); list.append(row);
+  });
+  computeRoute(fit);
+}
+async function computeRoute(fit = false) {
   const req = ++routeReq;
-  $('routeMsg').textContent = 'กำลังคำนวณเส้นทาง…';
-  let pts, fallback = false;
-  try {
-    const res = await fetch(`${ROUTE_API}${a[1]},${a[0]};${b[1]},${b[0]}?overview=full&geometries=geojson`);
-    const data = await res.json();
-    if (data.code !== 'Ok' || !data.routes.length) throw new Error(data.code || 'no route');
-    pts = data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
-    // the router snaps to the nearest path; connect the real endpoints
-    if (dist(a, pts[0]) > 1) pts.unshift(a);
-    if (dist(b, pts[pts.length - 1]) > 1) pts.push(b);
-  } catch (e) {
-    pts = [a, b]; fallback = true;
+  if (wps.length < 2) {
+    route = null; routeLine.setLatLngs([]); $('routeMsg').textContent = ''; refresh(); return;
   }
-  if (req !== routeReq) return;   // a newer request superseded this one
+  const coords = wpCoords(), mode = $('mode').value;
+  let pts, fallback = false, duration = null;
+  if (mode === 'straight') pts = coords;
+  else {
+    $('routeMsg').textContent = 'กำลังคำนวณเส้นทาง…';
+    try {
+      const res = await fetch(ROUTE_API[mode] + coords.map(c => `${c[1]},${c[0]}`).join(';') + '?overview=full&geometries=geojson');
+      const data = await res.json();
+      if (data.code !== 'Ok' || !data.routes.length) throw new Error(data.code || 'no route');
+      pts = data.routes[0].geometry.coordinates.map(c => [c[1], c[0]]);
+      if (mode === 'car') duration = data.routes[0].duration;
+      // the router snaps to the nearest road/path; connect the real endpoints
+      const a = coords[0], b = coords[coords.length - 1];
+      if (dist(a, pts[0]) > 1) pts.unshift(a);
+      if (dist(b, pts[pts.length - 1]) > 1) pts.push(b);
+    } catch (e) {
+      pts = coords; fallback = true;
+    }
+    if (req !== routeReq) return;   // a newer request superseded this one
+  }
   const cum = cumulative(pts);
-  route = { pts, cum, total: cum[cum.length - 1], fallback };
+  route = { pts, cum, total: cum[cum.length - 1], duration, fallback };
   routeLine.setLatLngs(pts).setStyle({ dashArray: fallback ? '10 10' : null });
   $('routeMsg').textContent = fallback ? 'ไม่พบเส้นทางบนแผนที่ — ใช้เส้นตรงแทน โปรดตรวจสอบสิ่งกีดขวาง' : '';
-  map.fitBounds(routeLine.getBounds(), { padding: [60, 60], maxZoom: 18 });
+  if (fit) map.fitBounds(routeLine.getBounds(), { padding: [60, 60], maxZoom: 18 });
   refresh();
 }
 function clearRoute() {
-  routeReq++;
-  [startM, goalM].forEach(m => m && map.removeLayer(m));
-  startM = goalM = route = null;
-  routeLine.setLatLngs([]); trailLine.setLatLngs([]);
-  $('routeMsg').textContent = '';
-  updatePointText(); refresh();
+  wps.forEach(m => map.removeLayer(m)); wps = [];
+  trailLine.setLatLngs([]);
+  onWpsChanged();
+}
+function applyRoute(r) {
+  wps.forEach(m => map.removeLayer(m)); wps = [];
+  trailLine.setLatLngs([]);
+  if (r.mode in ROUTE_API || r.mode === 'straight') $('mode').value = r.mode;
+  r.points.forEach(p => addWp(L.latLng(p[0], p[1])));
+  onWpsChanged(true);
+}
+// m/s used for ETA and simulation: the router's driving estimate in car mode, the slider otherwise
+const speed = () => route && route.duration ? route.total / route.duration : +$('spd').value;
+
+// ---------- saved routes ----------
+function readSaved() {
+  try { const v = JSON.parse(localStorage.getItem(SAVE_KEY)); return Array.isArray(v) ? v : []; } catch { return []; }
+}
+function renderSaved(selectName) {
+  const list = readSaved(), sel = $('saved');
+  sel.textContent = '';
+  if (!list.length) sel.add(new Option('ยังไม่มีเส้นทางที่บันทึก', ''));
+  list.forEach(r => sel.add(new Option(`${r.name} (${r.points.length} จุด)`, r.name)));
+  if (selectName) sel.value = selectName;
+}
+const say = t => { $('saveMsg').textContent = t; };
+function download(name, text, type) {
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([text], { type })); a.download = name; a.click();
+  URL.revokeObjectURL(a.href);
+}
+function needRoute() {
+  if (wps.length >= 2) return true;
+  say('ต้องมีอย่างน้อย 2 จุดในเส้นทางก่อน'); return false;
 }
 
 // ---------- mission ----------
@@ -308,6 +386,7 @@ function startMission() {
   const cum = cumulative(pts);
   Object.assign(mission, { state: 'run', pts, cum, total: cum[cum.length - 1], traveled: 0, seg: 0 });
   trailLine.setLatLngs([robot.pos]);
+  setEditable(false);
   if (source === 'ws') sendWs({ type: 'mission', speed: +$('spd').value, waypoints: route.pts.map(p => ({ lat: p[0], lon: p[1] })) });
   refresh();
 }
@@ -319,11 +398,12 @@ function togglePause() {
 function endMission(state) {
   if (state === 'idle' && source === 'ws') sendWs({ type: 'cancel' });
   mission.state = state;
+  setEditable(true);
   if (source === 'sim') setRobot(...robot.pos, robot.heading, 0);
   refresh();
 }
 function simStep(dt) {
-  const v = +$('spd').value;
+  const v = speed();
   mission.traveled = Math.min(mission.total, mission.traveled + v * dt * +$('simMult').value);
   const { pts, cum } = mission;
   while (mission.seg < pts.length - 2 && cum[mission.seg + 1] <= mission.traveled) mission.seg++;
@@ -354,7 +434,7 @@ function refresh() {
   }
   $('distLbl').textContent = mission.state === 'idle' ? 'ระยะทาง' : 'ระยะทางคงเหลือ';
   $('dist').textContent = remain == null ? '–' : fmtDist(remain);
-  $('eta').textContent = remain == null ? '–' : fmtTime(remain / +$('spd').value);
+  $('eta').textContent = remain == null ? '–' : fmtTime(remain / speed());
   $('prog').value = progress;
 
   $('btnStart').disabled = !route || active || (source === 'ws' && !(ws && ws.readyState === 1));
@@ -362,41 +442,94 @@ function refresh() {
   $('btnPause').textContent = mission.state === 'pause' ? 'ไปต่อ' : 'หยุดชั่วคราว';
   $('btnCancel').disabled = !active;
   $('btnExport').disabled = !route;
-  ['pickStart', 'pickGoal', 'useRobot', 'btnClear', 'pickRobot', 'source'].forEach(id => $(id).disabled = active);
-  $('pickStart').classList.toggle('active', pickMode === 'start');
-  $('pickGoal').classList.toggle('active', pickMode === 'goal');
+  ['pickAdd', 'undo', 'useRobot', 'btnClear', 'pickRobot', 'source', 'mode', 'loadRoute'].forEach(id => $(id).disabled = active);
+  $('spd').disabled = !!(route && route.duration);
+  $('pickAdd').classList.toggle('active', pickMode === 'add');
+  $('pickAdd').textContent = pickMode === 'add' ? '✓ เสร็จสิ้นการเพิ่มจุด' : '＋ เพิ่มจุดบนแผนที่';
   $('pickRobot').classList.toggle('active', pickMode === 'robot');
   map.getContainer().classList.toggle('picking', !!pickMode);
 }
 function setPick(mode) { pickMode = pickMode === mode ? null : mode; refresh(); }
 
 map.on('click', e => {
-  if (!pickMode) return;
-  const mode = pickMode; pickMode = null;
-  if (mission.state === 'done') mission.state = 'idle';
-  if (mode === 'robot') { trailLine.setLatLngs([]); setRobot(e.latlng.lat, e.latlng.lng, robot.heading, 0); refresh(); }
-  else placePoint(mode, e.latlng);
+  if (!pickMode || isActive()) return;
+  if (pickMode === 'robot') {
+    pickMode = null;
+    if (mission.state === 'done') mission.state = 'idle';
+    trailLine.setLatLngs([]); setRobot(e.latlng.lat, e.latlng.lng, robot.heading, 0);
+  } else { addWp(e.latlng); onWpsChanged(); }   // stay in add mode so points can be placed one after another
   refresh();
 });
-$('pickStart').onclick = () => setPick('start');
-$('pickGoal').onclick = () => setPick('goal');
+$('pickAdd').onclick = () => setPick('add');
 $('pickRobot').onclick = () => setPick('robot');
-$('useRobot').onclick = () => { if (mission.state === 'done') mission.state = 'idle'; placePoint('start', L.latLng(robot.pos)); };
+$('undo').onclick = () => { if (wps.length) removeWp(wps.length - 1); };
+$('mode').onchange = () => computeRoute();
+$('useRobot').onclick = () => {
+  if (wps.length) wps[0].setLatLng(robot.pos); else addWp(L.latLng(robot.pos));
+  onWpsChanged();
+};
+
+$('saveRoute').onclick = () => {
+  const name = $('routeName').value.trim();
+  if (!needRoute()) return;
+  if (!name) { say('กรุณาตั้งชื่อเส้นทาง'); return; }
+  const list = readSaved().filter(r => r.name !== name);
+  list.push({ name, mode: $('mode').value, points: wpCoords().map(p => [+p[0].toFixed(6), +p[1].toFixed(6)]), saved: new Date().toISOString() });
+  try { localStorage.setItem(SAVE_KEY, JSON.stringify(list)); } catch { say('บันทึกไม่ได้ — เบราว์เซอร์ไม่อนุญาตให้เก็บข้อมูล'); return; }
+  renderSaved(name); say(`บันทึก "${name}" แล้ว`);
+};
+$('loadRoute').onclick = () => {
+  const r = readSaved().find(r => r.name === $('saved').value);
+  if (!r) return;
+  pickMode = null; applyRoute(r); $('routeName').value = r.name; say(`เปิด "${r.name}" แล้ว`);
+};
+$('delRoute').onclick = () => {
+  const name = $('saved').value;
+  if (!name || !confirm(`ลบเส้นทาง "${name}" ออกจากอุปกรณ์นี้?`)) return;
+  localStorage.setItem(SAVE_KEY, JSON.stringify(readSaved().filter(r => r.name !== name)));
+  renderSaved(); say(`ลบ "${name}" แล้ว`);
+};
+$('gmaps').onclick = () => {
+  if (!needRoute()) return;
+  const c = wpCoords().map(p => `${p[0].toFixed(6)},${p[1].toFixed(6)}`);
+  let mid = c.slice(1, -1);
+  const MAX = 9;                               // Google Maps accepts at most 9 intermediate stops in a link
+  const trimmed = mid.length > MAX;
+  if (trimmed) mid = Array.from({ length: MAX }, (_, i) => mid[Math.round(i * (mid.length - 1) / (MAX - 1))]);
+  let url = `https://www.google.com/maps/dir/?api=1&origin=${c[0]}&destination=${c[c.length - 1]}`
+    + `&travelmode=${$('mode').value === 'foot' ? 'walking' : 'driving'}`;
+  if (mid.length) url += '&waypoints=' + encodeURIComponent(mid.join('|'));
+  say(trimmed ? `Google Maps รับจุดแวะได้ ${MAX} จุด จึงเลือกส่งเฉพาะบางจุด` : '');
+  window.open(url, '_blank', 'noopener');
+};
+$('shareLink').onclick = async () => {
+  if (!needRoute()) return;
+  const link = location.origin + location.pathname + '#r=' + $('mode').value + ';'
+    + wpCoords().map(p => `${p[0].toFixed(6)},${p[1].toFixed(6)}`).join(';');
+  try { await navigator.clipboard.writeText(link); say('คัดลอกลิงก์แล้ว — เปิดลิงก์นี้ในอุปกรณ์อื่นเพื่อโหลดเส้นทาง'); }
+  catch { prompt('คัดลอกลิงก์นี้:', link); }
+};
+$('gpx').onclick = () => {
+  if (!route) { say('ต้องมีอย่างน้อย 2 จุดในเส้นทางก่อน'); return; }
+  const esc = s => s.replace(/[<>&"]/g, ch => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;', '"': '&quot;' }[ch]));
+  const name = esc($('routeName').value.trim() || 'route');
+  const gpx = `<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="robot-nav" xmlns="http://www.topografix.com/GPX/1/1">\n`
+    + wpCoords().map((p, i) => `  <wpt lat="${p[0]}" lon="${p[1]}"><name>${wpLabel(i)}</name></wpt>\n`).join('')
+    + `  <trk><name>${name}</name><trkseg>\n`
+    + route.pts.map(p => `    <trkpt lat="${p[0]}" lon="${p[1]}"/>\n`).join('')
+    + '  </trkseg></trk>\n</gpx>\n';
+  download('route.gpx', gpx, 'application/gpx+xml');
+};
 $('btnCenter').onclick = () => map.setView(robot.pos, Math.max(map.getZoom(), 17));
 $('btnStart').onclick = startMission;
 $('btnPause').onclick = togglePause;
 $('btnCancel').onclick = () => endMission('idle');
 $('btnClear').onclick = () => { mission.state = 'idle'; clearRoute(); };
 $('spd').oninput = () => { $('spdVal').textContent = (+$('spd').value).toFixed(1); refresh(); };
-$('btnExport').onclick = () => {
-  const blob = new Blob([JSON.stringify({
-    created: new Date().toISOString(), distance_m: Math.round(route.total * 10) / 10, speed_mps: +$('spd').value,
-    waypoints: route.pts.map(p => ({ lat: p[0], lon: p[1] }))
-  }, null, 2)], { type: 'application/json' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob); a.download = 'waypoints.json'; a.click();
-  URL.revokeObjectURL(a.href);
-};
+$('btnExport').onclick = () => download('waypoints.json', JSON.stringify({
+  created: new Date().toISOString(), distance_m: Math.round(route.total * 10) / 10, speed_mps: +speed().toFixed(2),
+  waypoints: route.pts.map(p => ({ lat: p[0], lon: p[1] }))
+}, null, 2), 'application/json');
 map.on('dragstart', () => { $('follow').checked = false; });
 
 // ---------- position source ----------
@@ -463,8 +596,14 @@ setInterval(() => {
   refresh();
 }, 100);
 
-placePoint('start', L.latLng(HOME));
 setRobot(HOME[0], HOME[1], 0, 0);
+renderSaved();
+// a shared link carries the route as #r=<mode>;lat,lon;lat,lon;...
+const shared = /^#r=([a-z]+);(.+)$/.exec(location.hash);
+const sharedPts = shared ? shared[2].split(';').map(s => s.split(',').map(Number)) : [];
+if (sharedPts.length >= 2 && sharedPts.every(p => p.length === 2 && Math.abs(p[0]) <= 90 && Math.abs(p[1]) <= 180)) {
+  applyRoute({ mode: shared[1], points: sharedPts });
+} else { addWp(L.latLng(HOME)); onWpsChanged(); }
 refresh();
 </script>
 </body>

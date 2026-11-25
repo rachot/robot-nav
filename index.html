@@ -131,9 +131,6 @@
       <button id="delRoute" class="danger">ลบ</button>
     </div>
     <div class="row">
-      <button id="gmaps" class="primary">นำทางใน Google Maps (จอรถ)</button>
-    </div>
-    <div class="row">
       <button id="shareLink">คัดลอกลิงก์เส้นทาง</button>
       <button id="gpx">ดาวน์โหลด GPX</button>
     </div>
@@ -488,19 +485,6 @@ $('delRoute').onclick = () => {
   if (!name || !confirm(`ลบเส้นทาง "${name}" ออกจากอุปกรณ์นี้?`)) return;
   localStorage.setItem(SAVE_KEY, JSON.stringify(readSaved().filter(r => r.name !== name)));
   renderSaved(); say(`ลบ "${name}" แล้ว`);
-};
-$('gmaps').onclick = () => {
-  if (!needRoute()) return;
-  const c = wpCoords().map(p => `${p[0].toFixed(6)},${p[1].toFixed(6)}`);
-  let mid = c.slice(1, -1);
-  const MAX = 9;                               // Google Maps accepts at most 9 intermediate stops in a link
-  const trimmed = mid.length > MAX;
-  if (trimmed) mid = Array.from({ length: MAX }, (_, i) => mid[Math.round(i * (mid.length - 1) / (MAX - 1))]);
-  let url = `https://www.google.com/maps/dir/?api=1&origin=${c[0]}&destination=${c[c.length - 1]}`
-    + `&travelmode=${$('mode').value === 'foot' ? 'walking' : 'driving'}`;
-  if (mid.length) url += '&waypoints=' + encodeURIComponent(mid.join('|'));
-  say(trimmed ? `Google Maps รับจุดแวะได้ ${MAX} จุด จึงเลือกส่งเฉพาะบางจุด` : '');
-  window.open(url, '_blank', 'noopener');
 };
 $('shareLink').onclick = async () => {
   if (!needRoute()) return;
